@@ -1,5 +1,6 @@
 import {useEffect,useMemo,useState} from 'react'
 import readXlsxFile from 'read-excel-file/browser'
+import {unzipSync,strFromU8} from 'fflate'
 import {createClient} from '@supabase/supabase-js'
 
 const sb=createClient(import.meta.env.VITE_SUPABASE_URL||'https://ambjtvcsakliqhhcumol.supabase.co',
@@ -40,8 +41,64 @@ async function fetchAll(table,cols){
   return result
 }
 
+// Alguns programas exportam células do Excel como t="str". Esse leitor alternativo
+// reconhece esse formato e preserva o nome real das abas, sem pedir mudanças na planilha.
+async function readXlsxCompatible(file){
+  const zip=unzipSync(new Uint8Array(await file.arrayBuffer()))
+  const read=path=>{
+    const bytes=zip[path]
+    if(!bytes)throw new Error('Arquivo Excel incompleto: '+path)
+    const xml=new DOMParser().parseFromString(strFromU8(bytes),'application/xml')
+    if(xml.querySelector('parsererror'))throw new Error('Não foi possível interpretar o conteúdo XML da planilha.')
+    return xml
+  }
+  const list=(element,name)=>Array.from(element.getElementsByTagName('*')).filter(n=>n.localName===name)
+  const first=(element,name)=>list(element,name)[0]
+  const value=(element)=>element?.textContent??''
+  const workbook=read('xl/workbook.xml')
+  const sheets=list(workbook,'sheet')
+  const selected=sheets.find(x=>norm(x.getAttribute('name'))===norm('Acervo identificado'))||sheets[0]
+  if(!selected)throw new Error('Nenhuma aba encontrada no arquivo.')
+  const relation=selected.getAttribute('r:id')||Array.from(selected.attributes).find(a=>a.localName==='id')?.value
+  const rels=read('xl/_rels/workbook.xml.rels')
+  const target=list(rels,'Relationship').find(x=>x.getAttribute('Id')===relation)?.getAttribute('Target')
+  if(!target)throw new Error('Não foi possível encontrar a aba Acervo identificado.')
+  let path=target.replace(/^\\/,'').replace(/^\//,'')
+  if(!path.startsWith('xl/'))path='xl/'+path
+  path=path.replace(/\/\.\//g,'/')
+  const sheet=read(path)
+  let strings=[]
+  if(zip['xl/sharedStrings.xml']){
+    const shared=read('xl/sharedStrings.xml')
+    strings=list(shared,'si').map(si=>list(si,'t').map(value).join(''))
+  }
+  const numberOfColumn=address=>{
+    const letters=(address.match(/^[A-Z]+/i)||[''])[0].toUpperCase()
+    let col=0
+    for(const char of letters)col=col*26+char.charCodeAt(0)-64
+    return col-1
+  }
+  const data=[]
+  for(const row of list(sheet,'row')){
+    const arr=[]
+    for(const cell of list(row,'c')){
+      const i=numberOfColumn(cell.getAttribute('r')||'')
+      if(i<0||i>400)continue
+      const typ=cell.getAttribute('t')
+      const raw=value(first(cell,'v'))
+      let item=typ==='inlineStr'?list(first(cell,'is')||cell,'t').map(value).join('')
+        :typ==='s'?strings[Number(raw)]??'':raw
+      if(typ==='n'||(!typ&&raw!==''))item=Number(raw)
+      arr[i]=item
+    }
+    data.push(arr)
+  }
+  return data
+}
+
 function normalizeSpreadsheet(grid){
-  const headers=(grid[0]||[]).map(norm)
+  const headerIndex=grid.findIndex(r=>r?.some(c=>norm(c)==='titulo')&&r?.some(c=>['autor(es)','autor','autores'].includes(norm(c))))
+  const headers=(grid[headerIndex<0?0:headerIndex]||[]).map(norm)
   const col=(names)=>names.map(norm).map(n=>headers.indexOf(n)).find(i=>i>=0)
   const idx={
     titulo:col(['Título','Titulo','Livro']),autor:col(['Autor(es)','Autor','Autores']),
@@ -50,14 +107,14 @@ function normalizeSpreadsheet(grid){
     foto:col(['Foto(s)','Fotos']),status:col(['Status']),obs:col(['Observações','Observacoes']),
     isbn:col(['ISBN'])
   }
-  if(idx.titulo===undefined||idx.autor===undefined)throw new Error('A planilha precisa ter as colunas Título e Autor(es) (ou Autor).')
+  if(idx.titulo===undefined||idx.autor===undefined)throw new Error('Não localizei as colunas Título e Autor(es). Cabeçalhos encontrados: '+headers.filter(Boolean).slice(0,12).join(' | '))
   const get=(row,k)=>idx[k]===undefined?null:row[idx[k]]
-  const parsed=grid.slice(1).map((r,i)=>{
+  const parsed=grid.slice((headerIndex<0?0:headerIndex)+1).map((r,i)=>{
     const titulo=txt(get(r,'titulo')),autor=txt(get(r,'autor'))
     const raw=get(r,'qtd')
     const qtd=raw==null||raw===''?1:Number(raw)
     const ano=txt(get(r,'ano'))
-    return {n:i+2,titulo,autor,editora:txt(get(r,'editora')),
+    return {n:i+(headerIndex<0?0:headerIndex)+2,titulo,autor,editora:txt(get(r,'editora')),
       ano:ano?Number(ano):null,isbn:txt(get(r,'isbn')),categoria:txt(get(r,'categoria')),
       qtd:Number.isInteger(qtd)&&qtd>=1&&qtd<=50?qtd:0,
       foto:txt(get(r,'foto')),status:txt(get(r,'status')),obs:txt(get(r,'obs')),
@@ -98,8 +155,10 @@ export default function ImportarAcervo({say}){
       let grid
       if(suffix.endsWith('.csv'))grid=parseCsv(await chosen.text())
       else {
-        try{grid=await readXlsxFile(chosen,{sheet:'Acervo identificado'})}
-        catch{grid=await readXlsxFile(chosen)}
+        try{
+          grid=await readXlsxFile(chosen,{sheet:'Acervo identificado'})
+          normalizeSpreadsheet(grid)
+        }catch{grid=await readXlsxCompatible(chosen)}
       }
       const items=normalizeSpreadsheet(grid)
       setRows(items);setFile(chosen.name)
