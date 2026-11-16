@@ -1,5 +1,5 @@
 import {useEffect,useMemo,useState} from 'react'
-import readXlsxFile from 'read-excel-file/browser'
+import readXlsxFile from 'read-excel-file'
 import {unzipSync,strFromU8} from 'fflate'
 import {createClient} from '@supabase/supabase-js'
 
