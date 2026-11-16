@@ -1,5 +1,5 @@
 import {useEffect,useMemo,useState} from 'react'
-import readXlsxFile from 'read-excel-file'
+import readXlsxFile from 'read-excel-file/browser'
 import {createClient} from '@supabase/supabase-js'
 
 const sb=createClient(import.meta.env.VITE_SUPABASE_URL||'https://ambjtvcsakliqhhcumol.supabase.co',
@@ -74,6 +74,7 @@ export default function ImportarAcervo({say}){
   const [loading,setLoading]=useState(false)
   const [sending,setSending]=useState(false)
   const [report,setReport]=useState([])
+  const [fileError,setFileError]=useState('')
   const [settings,setSettings]=useState({prateleira:'',estado:'Bom'})
   useEffect(()=>{fetchAll('livros','id,titulo,autor').then(setExisting).catch(e=>say('err','Erro ao consultar livros: '+err(e)))},[])
   const existingKeys=useMemo(()=>new Set(existing.map(key)),[existing])
@@ -89,7 +90,7 @@ export default function ImportarAcervo({say}){
   async function loadFile(e){
     const chosen=e.target.files?.[0]
     if(!chosen)return
-    setLoading(true);setRows([]);setFile('');setReport([])
+    setLoading(true);setRows([]);setFile('');setReport([]);setFileError('')
     try{
       if(chosen.size>5*1024*1024)throw new Error('Selecione um arquivo de até 5 MB.')
       const suffix=chosen.name.toLowerCase()
@@ -103,7 +104,7 @@ export default function ImportarAcervo({say}){
       const items=normalizeSpreadsheet(grid)
       setRows(items);setFile(chosen.name)
       say('ok',items.length+' linha(s) lida(s). Confira antes de importar.')
-    }catch(error){say('err','Não foi possível ler a planilha: '+err(error))}
+    }catch(error){const message='Não foi possível ler a planilha: '+err(error);setFileError(message);say('err',message)}
     finally{setLoading(false);e.target.value=''}
   }
   async function importNow(){
@@ -173,6 +174,7 @@ export default function ImportarAcervo({say}){
       <label htmlFor="ilk-import-file">Arquivo .xlsx ou .csv (até 5 MB)</label>
       <input id="ilk-import-file" type="file" accept=".xlsx,.csv" onChange={loadFile} disabled={loading||sending}/>
       {loading&&<p>Lendo arquivo…</p>}
+      {fileError&&<p role="alert" style={{color:'#991b1b',fontWeight:600}}>{fileError}</p>}
     </div>
     {!!rows.length&&<>
       <div className="panel">
