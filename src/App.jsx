@@ -1,5 +1,6 @@
 import {useEffect,useState,useCallback} from 'react'
 import {createClient} from '@supabase/supabase-js'
+import ImportarAcervo from './ImportarAcervo'
 
 const ADMIN='biblioteca.institutolutherking@gmail.com'
 // Somente a chave pública (publishable). Nunca coloque service_role aqui.
@@ -234,7 +235,7 @@ function Login({say}){
     <button className="b p" disabled={busy}>{busy?'Entrando…':'Entrar'}</button></form></div>
 }
 
-const PAGES={painel:['Painel',Painel],livros:['Livros',Livros],categorias:['Categorias',Categorias],
+const PAGES={painel:['Painel',Painel],livros:['Livros',Livros],importar:['Importar Excel',ImportarAcervo],categorias:['Categorias',Categorias],
   exemplares:['Exemplares',Exemplares],leitores:['Leitores',Leitores],emprestimos:['Empréstimos',Emprestimos],relatorios:['Relatórios',Relatorios]}
 
 export default function App(){
