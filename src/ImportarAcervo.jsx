@@ -1,5 +1,5 @@
 import {useEffect,useMemo,useState} from 'react'
-import readXlsxFile from 'read-excel-file/browser'
+import readXlsxFile from 'read-excel-file'
 import {createClient} from '@supabase/supabase-js'
 
 const sb=createClient(import.meta.env.VITE_SUPABASE_URL||'https://ambjtvcsakliqhhcumol.supabase.co',
