@@ -1,5 +1,5 @@
 import {useEffect,useMemo,useState} from 'react'
-import {readSheet} from 'read-excel-file/browser'
+import readXlsxFile from 'read-excel-file/browser'
 import {createClient} from '@supabase/supabase-js'
 
 const sb=createClient(import.meta.env.VITE_SUPABASE_URL||'https://ambjtvcsakliqhhcumol.supabase.co',
@@ -97,8 +97,8 @@ export default function ImportarAcervo({say}){
       let grid
       if(suffix.endsWith('.csv'))grid=parseCsv(await chosen.text())
       else {
-        try{grid=await readSheet(chosen,{sheet:'Acervo identificado'})}
-        catch{grid=await readSheet(chosen)}
+        try{grid=await readXlsxFile(chosen,{sheet:'Acervo identificado'})}
+        catch{grid=await readXlsxFile(chosen)}
       }
       const items=normalizeSpreadsheet(grid)
       setRows(items);setFile(chosen.name)
