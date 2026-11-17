@@ -118,7 +118,7 @@ function normalizeSpreadsheet(grid){
       ano:ano?Number(ano):null,isbn:txt(get(r,'isbn')),categoria:txt(get(r,'categoria')),
       qtd:Number.isInteger(qtd)&&qtd>=1&&qtd<=50?qtd:0,
       foto:txt(get(r,'foto')),status:txt(get(r,'status')),obs:txt(get(r,'obs')),
-      checked:!!titulo&&!!autor,concluido:false}
+      checked:false,concluido:false}
   }).filter(r=>r.titulo||r.autor)
   if(!parsed.length)throw new Error('Nenhum título encontrado na aba de acervo.')
   return parsed
@@ -133,6 +133,7 @@ export default function ImportarAcervo({say}){
   const [report,setReport]=useState([])
   const [fileError,setFileError]=useState('')
   const [settings,setSettings]=useState({prateleira:'',estado:'Bom'})
+  const [reviewConfirmed,setReviewConfirmed]=useState(false)
   useEffect(()=>{fetchAll('livros','id,titulo,autor').then(setExisting).catch(e=>say('err','Erro ao consultar livros: '+err(e)))},[])
   const existingKeys=useMemo(()=>new Set(existing.map(key)),[existing])
   const firstSeen=new Set()
@@ -147,7 +148,7 @@ export default function ImportarAcervo({say}){
   async function loadFile(e){
     const chosen=e.target.files?.[0]
     if(!chosen)return
-    setLoading(true);setRows([]);setFile('');setReport([]);setFileError('')
+    setLoading(true);setRows([]);setFile('');setReport([]);setFileError('');setReviewConfirmed(false)
     try{
       if(chosen.size>5*1024*1024)throw new Error('Selecione um arquivo de até 5 MB.')
       const suffix=chosen.name.toLowerCase()
@@ -168,6 +169,7 @@ export default function ImportarAcervo({say}){
   }
   async function importNow(){
     if(!ready.length)return say('err','Não há títulos válidos selecionados.')
+    if(!reviewConfirmed)return say('err','Marque a confirmação de revisão dos dados e quantidades antes de importar.')
     if(!window.confirm('Importar '+ready.length+' título(s) e '+ready.reduce((s,r)=>s+r.qtd,0)+' exemplar(es) para o banco real? Verifique as quantidades antes de confirmar.'))return
     setSending(true);const output=[]
     try{
@@ -239,7 +241,8 @@ export default function ImportarAcervo({say}){
       <div className="panel">
         <h3>{file}</h3>
         <p>Foram encontradas <b>{rows.length}</b> linhas. <b>{ready.length}</b> prontas para importação;
-          {' '}<b>{withDuplicate.filter(r=>r.duplicate).length}</b> possíveis duplicatas.
+          {' '}<b>{withDuplicate.filter(r=>r.duplicate).length}</b> possíveis duplicatas;
+          {' '}<b>{withDuplicate.filter(r=>r.status&&/conferir|parcial|pendente/i.test(r.status)).length}</b> com informações que precisam de conferência.
           Os exemplares observados nas fotografias não constituem contagem definitiva: confirme a quantidade abaixo.</p>
         <div className="grid">
           <div><label>Prateleira dos novos exemplares (opcional)</label>
@@ -249,9 +252,14 @@ export default function ImportarAcervo({say}){
               {['Ótimo','Bom','Regular','Ruim'].map(e=><option key={e}>{e}</option>)}</select></div>
         </div>
       </div>
+      <div className="panel" style={{marginBottom:12}}>
+        <div className="bar"><button type="button" className="b s" disabled={sending} onClick={()=>setRows(old=>old.map(r=>({...r,checked:withDuplicate.some(x=>x.n===r.n&&!x.invalid&&!x.duplicate&&!x.concluido)})))}>Selecionar títulos válidos</button>
+          <button type="button" className="b s" disabled={sending} onClick={()=>setRows(old=>old.map(r=>({...r,checked:false})))}>Desmarcar todos</button></div>
+        <p style={{marginTop:10,marginBottom:0}}>Confira individualmente os títulos marcados como “Conferir dados” ou “Identificado (parcial)”. A seleção em massa não significa que os dados foram verificados.</p>
+      </div>
       <div className="tw"><table className="import-table">
         <thead><tr><th>Importar</th><th>Linha</th><th>Título</th><th>Autor(es)</th><th>Categoria sugerida</th>
-          <th>Exemplares</th><th>Verificação</th></tr></thead>
+          <th>Exemplares</th><th>Verificação</th><th>Foto e observações</th></tr></thead>
         <tbody>{withDuplicate.map(r=><tr key={r.n}>
           <td><input type="checkbox" aria-label={'Selecionar linha '+r.n} checked={r.checked&&!r.duplicate&&!r.concluido}
             disabled={sending||r.duplicate||r.concluido} onChange={e=>set(r.n,'checked',e.target.checked)}/></td>
@@ -266,11 +274,14 @@ export default function ImportarAcervo({say}){
             aria-label={'Exemplares da linha '+r.n} onChange={e=>set(r.n,'qtd',Number(e.target.value))}/></td>
           <td>{r.concluido?'Importado':r.duplicate?'Já consta no acervo / repetido na planilha':
             r.invalid?'Corrigir título, autor, ano ou quantidade':r.status||'Pronto'}</td>
+          <td style={{minWidth:220}}>{r.foto&&<div><b>Foto:</b> {r.foto}</div>}{r.obs||'—'}</td>
         </tr>)}</tbody>
       </table></div>
       <div className="panel" style={{marginTop:16}}>
         <p><b>{ready.length}</b> título(s) selecionado(s), <b>{ready.reduce((n,r)=>n+r.qtd,0)}</b> exemplar(es) para cadastro.</p>
-        <button className="b p" disabled={sending||!ready.length} onClick={importNow}>
+        <label style={{display:'flex',gap:8,alignItems:'flex-start',marginBottom:12,color:'var(--k)'}}><input type="checkbox" style={{width:'auto',marginTop:4}} checked={reviewConfirmed} disabled={sending} onChange={e=>setReviewConfirmed(e.target.checked)}/>
+          Conferi os títulos, os autores e as quantidades dos exemplares selecionados. Entendo que os dados extraídos das fotografias podem estar incompletos.</label>
+        <button className="b p" disabled={sending||!ready.length||!reviewConfirmed} onClick={importNow}>
           {sending?'Importando…':'Confirmar importação no Supabase'}</button>
       </div>
     </>}
