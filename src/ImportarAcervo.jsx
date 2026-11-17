@@ -1,5 +1,6 @@
 import {useEffect,useMemo,useState} from 'react'
 import readXlsxFile from 'read-excel-file'
+import {unzipSync,strFromU8} from 'fflate'
 import {createClient} from '@supabase/supabase-js'
 
 const sb=createClient(import.meta.env.VITE_SUPABASE_URL||'https://ambjtvcsakliqhhcumol.supabase.co',
@@ -40,8 +41,64 @@ async function fetchAll(table,cols){
   return result
 }
 
+// Alguns programas exportam células do Excel como t="str". Esse leitor alternativo
+// reconhece esse formato e preserva o nome real das abas, sem pedir mudanças na planilha.
+async function readXlsxCompatible(file){
+  const zip=unzipSync(new Uint8Array(await file.arrayBuffer()))
+  const read=path=>{
+    const bytes=zip[path]
+    if(!bytes)throw new Error('Arquivo Excel incompleto: '+path)
+    const xml=new DOMParser().parseFromString(strFromU8(bytes),'application/xml')
+    if(xml.querySelector('parsererror'))throw new Error('Não foi possível interpretar o conteúdo XML da planilha.')
+    return xml
+  }
+  const list=(element,name)=>Array.from(element.getElementsByTagName('*')).filter(n=>n.localName===name)
+  const first=(element,name)=>list(element,name)[0]
+  const value=(element)=>element?.textContent??''
+  const workbook=read('xl/workbook.xml')
+  const sheets=list(workbook,'sheet')
+  const selected=sheets.find(x=>norm(x.getAttribute('name'))===norm('Acervo identificado'))||sheets[0]
+  if(!selected)throw new Error('Nenhuma aba encontrada no arquivo.')
+  const relation=selected.getAttribute('r:id')||Array.from(selected.attributes).find(a=>a.localName==='id')?.value
+  const rels=read('xl/_rels/workbook.xml.rels')
+  const target=list(rels,'Relationship').find(x=>x.getAttribute('Id')===relation)?.getAttribute('Target')
+  if(!target)throw new Error('Não foi possível encontrar a aba Acervo identificado.')
+  let path=target.replace(/^\\/,'').replace(/^\//,'')
+  if(!path.startsWith('xl/'))path='xl/'+path
+  path=path.replace(/\/\.\//g,'/')
+  const sheet=read(path)
+  let strings=[]
+  if(zip['xl/sharedStrings.xml']){
+    const shared=read('xl/sharedStrings.xml')
+    strings=list(shared,'si').map(si=>list(si,'t').map(value).join(''))
+  }
+  const numberOfColumn=address=>{
+    const letters=(address.match(/^[A-Z]+/i)||[''])[0].toUpperCase()
+    let col=0
+    for(const char of letters)col=col*26+char.charCodeAt(0)-64
+    return col-1
+  }
+  const data=[]
+  for(const row of list(sheet,'row')){
+    const arr=[]
+    for(const cell of list(row,'c')){
+      const i=numberOfColumn(cell.getAttribute('r')||'')
+      if(i<0||i>400)continue
+      const typ=cell.getAttribute('t')
+      const raw=value(first(cell,'v'))
+      let item=typ==='inlineStr'?list(first(cell,'is')||cell,'t').map(value).join('')
+        :typ==='s'?strings[Number(raw)]??'':raw
+      if(typ==='n'||(!typ&&raw!==''))item=Number(raw)
+      arr[i]=item
+    }
+    data.push(arr)
+  }
+  return data
+}
+
 function normalizeSpreadsheet(grid){
-  const headers=(grid[0]||[]).map(norm)
+  const headerIndex=grid.findIndex(r=>r?.some(c=>norm(c)==='titulo')&&r?.some(c=>['autor(es)','autor','autores'].includes(norm(c))))
+  const headers=(grid[headerIndex<0?0:headerIndex]||[]).map(norm)
   const col=(names)=>names.map(norm).map(n=>headers.indexOf(n)).find(i=>i>=0)
   const idx={
     titulo:col(['Título','Titulo','Livro']),autor:col(['Autor(es)','Autor','Autores']),
@@ -50,18 +107,18 @@ function normalizeSpreadsheet(grid){
     foto:col(['Foto(s)','Fotos']),status:col(['Status']),obs:col(['Observações','Observacoes']),
     isbn:col(['ISBN'])
   }
-  if(idx.titulo===undefined||idx.autor===undefined)throw new Error('A planilha precisa ter as colunas Título e Autor(es) (ou Autor).')
+  if(idx.titulo===undefined||idx.autor===undefined)throw new Error('Não localizei as colunas Título e Autor(es). Cabeçalhos encontrados: '+headers.filter(Boolean).slice(0,12).join(' | '))
   const get=(row,k)=>idx[k]===undefined?null:row[idx[k]]
-  const parsed=grid.slice(1).map((r,i)=>{
+  const parsed=grid.slice((headerIndex<0?0:headerIndex)+1).map((r,i)=>{
     const titulo=txt(get(r,'titulo')),autor=txt(get(r,'autor'))
     const raw=get(r,'qtd')
     const qtd=raw==null||raw===''?1:Number(raw)
     const ano=txt(get(r,'ano'))
-    return {n:i+2,titulo,autor,editora:txt(get(r,'editora')),
+    return {n:i+(headerIndex<0?0:headerIndex)+2,titulo,autor,editora:txt(get(r,'editora')),
       ano:ano?Number(ano):null,isbn:txt(get(r,'isbn')),categoria:txt(get(r,'categoria')),
       qtd:Number.isInteger(qtd)&&qtd>=1&&qtd<=50?qtd:0,
       foto:txt(get(r,'foto')),status:txt(get(r,'status')),obs:txt(get(r,'obs')),
-      checked:!!titulo&&!!autor,concluido:false}
+      checked:false,concluido:false}
   }).filter(r=>r.titulo||r.autor)
   if(!parsed.length)throw new Error('Nenhum título encontrado na aba de acervo.')
   return parsed
@@ -74,7 +131,9 @@ export default function ImportarAcervo({say}){
   const [loading,setLoading]=useState(false)
   const [sending,setSending]=useState(false)
   const [report,setReport]=useState([])
+  const [fileError,setFileError]=useState('')
   const [settings,setSettings]=useState({prateleira:'',estado:'Bom'})
+  const [reviewConfirmed,setReviewConfirmed]=useState(false)
   useEffect(()=>{fetchAll('livros','id,titulo,autor').then(setExisting).catch(e=>say('err','Erro ao consultar livros: '+err(e)))},[])
   const existingKeys=useMemo(()=>new Set(existing.map(key)),[existing])
   const firstSeen=new Set()
@@ -89,7 +148,7 @@ export default function ImportarAcervo({say}){
   async function loadFile(e){
     const chosen=e.target.files?.[0]
     if(!chosen)return
-    setLoading(true);setRows([]);setFile('');setReport([])
+    setLoading(true);setRows([]);setFile('');setReport([]);setFileError('');setReviewConfirmed(false)
     try{
       if(chosen.size>5*1024*1024)throw new Error('Selecione um arquivo de até 5 MB.')
       const suffix=chosen.name.toLowerCase()
@@ -97,17 +156,20 @@ export default function ImportarAcervo({say}){
       let grid
       if(suffix.endsWith('.csv'))grid=parseCsv(await chosen.text())
       else {
-        try{grid=await readXlsxFile(chosen,{sheet:'Acervo identificado'})}
-        catch{grid=await readXlsxFile(chosen)}
+        try{
+          grid=await readXlsxFile(chosen,{sheet:'Acervo identificado'})
+          normalizeSpreadsheet(grid)
+        }catch{grid=await readXlsxCompatible(chosen)}
       }
       const items=normalizeSpreadsheet(grid)
       setRows(items);setFile(chosen.name)
       say('ok',items.length+' linha(s) lida(s). Confira antes de importar.')
-    }catch(error){say('err','Não foi possível ler a planilha: '+err(error))}
+    }catch(error){const message='Não foi possível ler a planilha: '+err(error);setFileError(message);say('err',message)}
     finally{setLoading(false);e.target.value=''}
   }
   async function importNow(){
     if(!ready.length)return say('err','Não há títulos válidos selecionados.')
+    if(!reviewConfirmed)return say('err','Marque a confirmação de revisão dos dados e quantidades antes de importar.')
     if(!window.confirm('Importar '+ready.length+' título(s) e '+ready.reduce((s,r)=>s+r.qtd,0)+' exemplar(es) para o banco real? Verifique as quantidades antes de confirmar.'))return
     setSending(true);const output=[]
     try{
@@ -173,12 +235,14 @@ export default function ImportarAcervo({say}){
       <label htmlFor="ilk-import-file">Arquivo .xlsx ou .csv (até 5 MB)</label>
       <input id="ilk-import-file" type="file" accept=".xlsx,.csv" onChange={loadFile} disabled={loading||sending}/>
       {loading&&<p>Lendo arquivo…</p>}
+      {fileError&&<p role="alert" style={{color:'#991b1b',fontWeight:600}}>{fileError}</p>}
     </div>
     {!!rows.length&&<>
       <div className="panel">
         <h3>{file}</h3>
         <p>Foram encontradas <b>{rows.length}</b> linhas. <b>{ready.length}</b> prontas para importação;
-          {' '}<b>{withDuplicate.filter(r=>r.duplicate).length}</b> possíveis duplicatas.
+          {' '}<b>{withDuplicate.filter(r=>r.duplicate).length}</b> possíveis duplicatas;
+          {' '}<b>{withDuplicate.filter(r=>r.status&&/conferir|parcial|pendente/i.test(r.status)).length}</b> com informações que precisam de conferência.
           Os exemplares observados nas fotografias não constituem contagem definitiva: confirme a quantidade abaixo.</p>
         <div className="grid">
           <div><label>Prateleira dos novos exemplares (opcional)</label>
@@ -188,9 +252,14 @@ export default function ImportarAcervo({say}){
               {['Ótimo','Bom','Regular','Ruim'].map(e=><option key={e}>{e}</option>)}</select></div>
         </div>
       </div>
+      <div className="panel" style={{marginBottom:12}}>
+        <div className="bar"><button type="button" className="b s" disabled={sending} onClick={()=>setRows(old=>old.map(r=>({...r,checked:withDuplicate.some(x=>x.n===r.n&&!x.invalid&&!x.duplicate&&!x.concluido)})))}>Selecionar títulos válidos</button>
+          <button type="button" className="b s" disabled={sending} onClick={()=>setRows(old=>old.map(r=>({...r,checked:false})))}>Desmarcar todos</button></div>
+        <p style={{marginTop:10,marginBottom:0}}>Confira individualmente os títulos marcados como “Conferir dados” ou “Identificado (parcial)”. A seleção em massa não significa que os dados foram verificados.</p>
+      </div>
       <div className="tw"><table className="import-table">
         <thead><tr><th>Importar</th><th>Linha</th><th>Título</th><th>Autor(es)</th><th>Categoria sugerida</th>
-          <th>Exemplares</th><th>Verificação</th></tr></thead>
+          <th>Exemplares</th><th>Verificação</th><th>Foto e observações</th></tr></thead>
         <tbody>{withDuplicate.map(r=><tr key={r.n}>
           <td><input type="checkbox" aria-label={'Selecionar linha '+r.n} checked={r.checked&&!r.duplicate&&!r.concluido}
             disabled={sending||r.duplicate||r.concluido} onChange={e=>set(r.n,'checked',e.target.checked)}/></td>
@@ -205,11 +274,14 @@ export default function ImportarAcervo({say}){
             aria-label={'Exemplares da linha '+r.n} onChange={e=>set(r.n,'qtd',Number(e.target.value))}/></td>
           <td>{r.concluido?'Importado':r.duplicate?'Já consta no acervo / repetido na planilha':
             r.invalid?'Corrigir título, autor, ano ou quantidade':r.status||'Pronto'}</td>
+          <td style={{minWidth:220}}>{r.foto&&<div><b>Foto:</b> {r.foto}</div>}{r.obs||'—'}</td>
         </tr>)}</tbody>
       </table></div>
       <div className="panel" style={{marginTop:16}}>
         <p><b>{ready.length}</b> título(s) selecionado(s), <b>{ready.reduce((n,r)=>n+r.qtd,0)}</b> exemplar(es) para cadastro.</p>
-        <button className="b p" disabled={sending||!ready.length} onClick={importNow}>
+        <label style={{display:'flex',gap:8,alignItems:'flex-start',marginBottom:12,color:'var(--k)'}}><input type="checkbox" style={{width:'auto',marginTop:4}} checked={reviewConfirmed} disabled={sending} onChange={e=>setReviewConfirmed(e.target.checked)}/>
+          Conferi os títulos, os autores e as quantidades dos exemplares selecionados. Entendo que os dados extraídos das fotografias podem estar incompletos.</label>
+        <button className="b p" disabled={sending||!ready.length||!reviewConfirmed} onClick={importNow}>
           {sending?'Importando…':'Confirmar importação no Supabase'}</button>
       </div>
     </>}
